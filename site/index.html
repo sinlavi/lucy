@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101816">
+    <meta name="description" content="Search the iTunes music catalog, listen to previews, and request authorized audio processing.">
+    <title>Lucy | The Music Index</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./config.js" defer></script>
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="wordmark" href="./" aria-label="Lucy home">
+        <span class="wordmark-icon" aria-hidden="true">✦</span>
+        <span>lucy<span class="wordmark-period">.</span></span>
+      </a>
+      <span class="catalog-label"><span class="status-dot"></span> THE ITUNES INDEX</span>
+    </header>
+
+    <main>
+      <section class="search-panel" aria-labelledby="page-title">
+        <p class="eyebrow">A FIELD GUIDE TO SOUND</p>
+        <h1 id="page-title">Find the song.<br><span>Follow its orbit.</span></h1>
+        <p class="intro">Somewhere between memory and melody, a familiar note is waiting.</p>
+
+        <form id="search-form" class="search-form" role="search">
+          <label class="visually-hidden" for="search-input">Song, artist, or album</label>
+          <span class="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4.2 4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </span>
+          <input id="search-input" name="term" type="search" placeholder="Search a song, artist, or album" autocomplete="off" required>
+          <button class="search-button" type="submit">Search <span aria-hidden="true">↗</span></button>
+        </form>
+      </section>
+
+      <section class="results-section" aria-labelledby="results-title">
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">THE CATALOGUE</p>
+            <h2 id="results-title">Search results</h2>
+          </div>
+          <span id="result-count" class="result-count" aria-live="polite"></span>
+        </div>
+        <div id="results" class="results-grid" aria-live="polite" aria-busy="false">
+          <div class="empty-state">
+            <span class="empty-mark" aria-hidden="true">✧</span>
+            <p>Your next favorite is somewhere in the index.</p>
+          </div>
+        </div>
+      </section>
+
+      <dialog id="download-dialog" class="download-dialog" aria-labelledby="download-title">
+        <form id="download-form" class="download-form">
+          <div class="dialog-heading">
+            <p class="eyebrow">A PRIVATE REQUEST</p>
+            <h2 id="download-title">Prepare this recording</h2>
+            <p id="download-track-name" class="dialog-track-name"></p>
+          </div>
+
+          <label class="field-label" for="download-quality">MP3 bitrate</label>
+          <select id="download-quality" name="quality">
+            <option value="128">128 kbps</option>
+            <option value="192" selected>192 kbps</option>
+            <option value="256">256 kbps</option>
+            <option value="320">320 kbps</option>
+          </select>
+
+          <label class="rights-check">
+            <input id="rights-confirmed" type="checkbox" required>
+            <span>I have the rights required to download and distribute this recording.</span>
+          </label>
+
+          <div id="turnstile-container" class="turnstile-slot"></div>
+          <p id="download-status" class="download-status" role="status" aria-live="polite"></p>
+          <a id="download-link" class="download-result-link" hidden>Download prepared file</a>
+
+          <div class="dialog-actions">
+            <button id="close-download" class="secondary-button" type="button">Close</button>
+            <button id="start-download" class="search-button" type="submit">Prepare file <span aria-hidden="true">↗</span></button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+
+    <footer class="footer">
+      <span>Lucy · Music Index</span>
+      <span>Previews and catalogue data by iTunes</span>
+    </footer>
+  </body>
+</html>

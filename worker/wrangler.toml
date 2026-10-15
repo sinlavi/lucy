@@ -1,0 +1,24 @@
+name = "lucy-api"
+main = "index.js"
+compatibility_date = "2026-10-15"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGIN = "https://sinlavi.github.io"
+TURNSTILE_HOSTNAME = "sinlavi.github.io"
+GITHUB_OWNER = "sinlavi"
+GITHUB_REPO = "lucy"
+GITHUB_WORKFLOW = "process-authorized-audio.yml"
+GITHUB_REF = "main"
+GITHUB_APP_ID = "REPLACE_WITH_GITHUB_APP_ID"
+GITHUB_INSTALLATION_ID = "REPLACE_WITH_GITHUB_INSTALLATION_ID"
+
+[[kv_namespaces]]
+binding = "JOBS"
+id = "00000000000000000000000000000000"
+
+[[unsafe.bindings]]
+name = "REQUEST_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 3, period = 60 }

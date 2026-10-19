@@ -11,16 +11,18 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -34,6 +36,9 @@ import androidx.core.view.setPadding
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.slider.Slider
 import java.util.concurrent.Executors
 
 data class Track(
@@ -90,10 +95,23 @@ class MainActivity : ComponentActivity() {
     private lateinit var miniTitle: TextView
     private lateinit var miniArtist: TextView
     private lateinit var miniPlay: TextView
+    private lateinit var miniProgress: ProgressBar
     private lateinit var search: EditText
+    private var nowPlayingProgress: Slider? = null
+    private var nowPlayingPosition: TextView? = null
+    private var nowPlayingDuration: TextView? = null
+    private var sleepTimerButton: MaterialButton? = null
     private val tabViews = mutableListOf<TextView>()
     private val libraryExecutor = Executors.newSingleThreadExecutor()
     private val metadataExecutor = Executors.newSingleThreadExecutor()
+    private val progressHandler = Handler(Looper.getMainLooper())
+    private var sleepTimerEndsAt = 0L
+    private val progressTicker = object : Runnable {
+        override fun run() {
+            updatePlaybackProgress()
+            progressHandler.postDelayed(this, 1_000L)
+        }
+    }
     private val audioPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) loadTracks()
         else {
@@ -154,7 +172,10 @@ class MainActivity : ComponentActivity() {
             else -> Player.REPEAT_MODE_OFF
         }
         player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) = updateMiniPlayer()
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                updateMiniPlayer()
+                if (currentPage is Page.NowPlaying) renderContent()
+            }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 updateMiniPlayer()
@@ -173,10 +194,12 @@ class MainActivity : ComponentActivity() {
             }
         })
         createLayout()
+        progressHandler.post(progressTicker)
         if (hasAudioPermission()) loadTracks() else requestAudioPermission()
     }
 
     override fun onDestroy() {
+        progressHandler.removeCallbacks(progressTicker)
         libraryExecutor.execute { database.close() }
         libraryExecutor.shutdown()
         metadataExecutor.shutdownNow()
@@ -200,40 +223,39 @@ class MainActivity : ComponentActivity() {
         screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(this@MainActivity.background)
-            setPadding(dp(20), dp(12), dp(20), dp(8))
+            setPadding(dp(20), dp(12), dp(20), dp(12))
         }
         val toolbar = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
         }
         val logo = TextView(this).apply {
-            text = "LUCY"
-            textSize = 22f
-            letterSpacing = 0.16f
+            text = "lucy"
+            textSize = 25f
             setTextColor(primary)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
-        toolbar.addView(logo, LinearLayout.LayoutParams(dp(78), dp(48)))
+        toolbar.addView(logo, LinearLayout.LayoutParams(dp(68), dp(48)))
         search = EditText(this).apply {
-            hint = "Search your music"
+            hint = "Search songs, artists, albums"
             textSize = 14f
             setSingleLine(true)
             setTextColor(textColor)
             setHintTextColor(muted)
-            setPadding(dp(12), 0, dp(12), 0)
-            background = roundedBackground(surface, dp(12))
+            setPadding(dp(14), 0, dp(14), 0)
+            background = roundedBackground(surface, dp(24))
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderContent()
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
-        toolbar.addView(search, LinearLayout.LayoutParams(0, dp(44), 1f))
+        toolbar.addView(search, LinearLayout.LayoutParams(0, dp(46), 1f))
         screen.addView(toolbar)
 
         val tabs = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, dp(8))
+            setPadding(0, dp(4), 0, dp(4))
         }
         val tabsScroll = android.widget.HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -242,10 +264,11 @@ class MainActivity : ComponentActivity() {
         listOf("Home", "Queue", "Artists", "Albums", "Playlists", "Settings").forEachIndexed { index, name ->
             val tab = TextView(this).apply {
                 text = name
-                textSize = 12f
+                textSize = 13f
                 gravity = Gravity.CENTER
-                setPadding(dp(12), 0, dp(12), 0)
-                setTextColor(if (index == 0) primary else muted)
+                setPadding(dp(16), 0, dp(16), 0)
+                background = roundedBackground(surface, dp(24))
+                setTextColor(muted)
                 setOnClickListener {
                     currentPage = when (index) {
                         1 -> Page.Queue
@@ -259,9 +282,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
             tabViews += tab
-            tabs.addView(tab, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
+            tabs.addView(tab, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+                marginEnd = dp(8)
+            })
         }
-        screen.addView(tabsScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60)))
+        screen.addView(tabsScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
 
         content = FrameLayout(this)
         screen.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -271,33 +296,45 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createMiniPlayer() {
-        val mini = LinearLayout(this).apply {
+        val mini = FrameLayout(this)
+        val card = MaterialCardView(this).apply {
+            radius = dp(18).toFloat()
+            cardElevation = dp(2).toFloat()
+            setCardBackgroundColor(surface)
+            strokeWidth = dp(1)
+            strokeColor = if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(55, 61, 54) else Color.rgb(225, 228, 220)
+        }
+        val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(10), dp(8))
-            background = roundedBackground(surface, dp(16))
-            setOnClickListener {
-                if (currentTrack() != null) {
-                    currentPage = Page.NowPlaying
-                    renderContent()
-                }
+            setPadding(dp(12), dp(7), dp(10), dp(8))
+        }
+        card.setOnClickListener {
+            if (currentTrack() != null) {
+                currentPage = Page.NowPlaying
+                renderContent()
             }
         }
+        card.addView(row, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68)))
         val cover = TextView(this).apply {
-            text = "♫"
-            textSize = 23f
+            text = "♪"
+            textSize = 22f
             gravity = Gravity.CENTER
-            setTextColor(this@MainActivity.background)
-            setBackgroundColor(primary)
+            setTextColor(primary)
+            background = roundedBackground(
+                if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(54, 67, 43) else Color.rgb(235, 242, 224),
+                dp(12)
+            )
         }
-        mini.addView(cover, LinearLayout.LayoutParams(dp(44), dp(44)))
+        row.addView(cover, LinearLayout.LayoutParams(dp(48), dp(48)))
         val labels = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
+            setPadding(dp(12), 0, dp(4), 0)
         }
         miniTitle = TextView(this).apply {
             text = "Nothing playing"
             textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(textColor)
             maxLines = 1
         }
@@ -308,17 +345,27 @@ class MainActivity : ComponentActivity() {
         }
         labels.addView(miniTitle)
         labels.addView(miniArtist)
-        mini.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         miniPlay = TextView(this).apply {
             text = "▶"
-            textSize = 20f
+            textSize = 21f
             gravity = Gravity.CENTER
             setTextColor(primary)
             setOnClickListener { togglePlayback() }
         }
-        mini.addView(miniPlay, LinearLayout.LayoutParams(dp(48), dp(48)))
-        screen.addView(mini, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)).apply {
-            topMargin = dp(10)
+        row.addView(miniPlay, LinearLayout.LayoutParams(dp(48), dp(48)))
+        mini.addView(card, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68)))
+        miniProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1_000
+            progress = 0
+            progressTintList = android.content.res.ColorStateList.valueOf(primary)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(
+                if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(58, 64, 57) else Color.rgb(226, 229, 220)
+            )
+        }
+        mini.addView(miniProgress, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2), Gravity.BOTTOM))
+        screen.addView(mini, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68)).apply {
+            topMargin = dp(8)
         })
     }
 
@@ -387,6 +434,10 @@ class MainActivity : ComponentActivity() {
 
     private fun renderContent() {
         if (!::content.isInitialized) return
+        nowPlayingProgress = null
+        nowPlayingPosition = null
+        nowPlayingDuration = null
+        sleepTimerButton = null
         content.removeAllViews()
         val selectedTab = when (currentPage) {
             Page.Queue -> 1
@@ -396,7 +447,11 @@ class MainActivity : ComponentActivity() {
             Page.Settings -> 5
             else -> 0
         }
-        tabViews.forEachIndexed { index, tab -> tab.setTextColor(if (index == selectedTab) primary else muted) }
+        tabViews.forEachIndexed { index, tab ->
+            val selected = index == selectedTab
+            tab.setTextColor(if (selected) primary else muted)
+            tab.background = roundedBackground(if (selected) surface else background, dp(24))
+        }
         val scroll = ScrollView(this).apply { isFillViewport = true }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -422,43 +477,94 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderLibrary(body: LinearLayout) {
-        addHeading(body, "YOUR LIBRARY")
         if (!hasAudioPermission()) {
+            addHeading(body, "Welcome to Lucy")
             addEmpty(body, "Lucy needs audio access to scan music stored on this device.")
             addActionButton(body, "Allow audio access") { requestAudioPermission() }
             return
         }
         TextView(this).apply {
-            text = "${tracks.size} songs on this device"
+            text = "YOUR MUSIC"
+            textSize = 12f
+            letterSpacing = 0.14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(muted)
+            setPadding(0, dp(10), 0, dp(4))
+        }.also(body::addView)
+        val isDark = background == Color.rgb(17, 20, 17)
+        val hero = MaterialCardView(this).apply {
+            radius = dp(22).toFloat()
+            cardElevation = dp(3).toFloat()
+            setCardBackgroundColor(if (isDark) Color.rgb(34, 43, 29) else Color.rgb(232, 240, 219))
+            strokeWidth = 0
+        }
+        val heroContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(18))
+        }
+        heroContent.addView(TextView(this).apply {
+            text = "A soundtrack for\nevery moment."
+            textSize = 25f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(textColor)
+            setLineSpacing(dp(2).toFloat(), 1f)
+        })
+        heroContent.addView(TextView(this).apply {
+            text = "${tracks.size} songs ready when you are"
             textSize = 14f
             setTextColor(muted)
-        }.also(body::addView)
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("Artists" to Page.Artists, "Albums" to Page.Albums, "Queue" to Page.Queue).forEach { (label, page) ->
-            val tile = TextView(this).apply {
-                text = "$label\n›"
-                textSize = 14f
-                setTextColor(textColor)
-                gravity = Gravity.CENTER
-                background = roundedBackground(surface, dp(14))
-                setOnClickListener { currentPage = page; renderContent() }
+            setPadding(0, dp(8), 0, dp(12))
+        })
+        heroContent.addView(MaterialButton(this).apply {
+            text = "↻   Shuffle play"
+            isAllCaps = false
+            textSize = 14f
+            setTextColor(if (isDark) Color.rgb(23, 32, 14) else Color.WHITE)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(primary)
+            cornerRadius = dp(24)
+            setOnClickListener {
+                if (tracks.isNotEmpty()) {
+                    player.shuffleModeEnabled = true
+                    preferences.edit().putBoolean("shuffle", true).apply()
+                    playTracks(sortTracks(tracks), 0)
+                } else Toast.makeText(this@MainActivity, "No music found on this device.", Toast.LENGTH_SHORT).show()
             }
-            val params = LinearLayout.LayoutParams(0, dp(76), 1f)
-            params.setMargins(0, dp(16), dp(8), dp(14))
-            actions.addView(tile, params)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
+        hero.addView(heroContent)
+        body.addView(hero, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
+            bottomMargin = dp(12)
+        })
+
+        addHeading(body, "PICK UP THE MOOD", small = true)
+        data class QuickAction(val icon: String, val title: String, val subtitle: String, val action: () -> Unit)
+        val quickActions = listOf(
+            QuickAction("♥", "Liked songs", "${favoriteIds.size} tracks") {
+                currentPage = Page.SmartPlaylist("liked", "Liked songs"); renderContent()
+            },
+            QuickAction("◷", "Recently played", "Your listening history") {
+                currentPage = Page.SmartPlaylist("recent", "Recently played"); renderContent()
+            },
+            QuickAction("✦", "Recently added", "Fresh to your library") {
+                currentPage = Page.SmartPlaylist("added", "Recently added"); renderContent()
+            },
+            QuickAction("☷", "Your queue", "${queue.size} tracks up next") {
+                currentPage = Page.Queue; renderContent()
+            }
+        )
+        quickActions.chunked(2).forEach { actions ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            actions.forEach { action -> addHomeTile(row, action.icon, action.title, action.subtitle, action.action) }
+            if (actions.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, dp(100), 1f))
+            body.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        body.addView(actions)
-        addHeading(body, "MADE FOR YOU", small = true)
-        listOf(
-            Triple("♥  Liked songs", "Your personal favorites", Page.SmartPlaylist("liked", "Liked songs")),
-            Triple("◷  Recently played", "Pick up where you left off", Page.SmartPlaylist("recent", "Recently played")),
-            Triple("↗  Most played", "Your all-time rotation", Page.SmartPlaylist("top", "Most played")),
-            Triple("✦  Recently added", "Fresh additions to your library", Page.SmartPlaylist("added", "Recently added"))
-        ).forEach { (title, subtitle, page) ->
-            addSimpleRow(body, title, subtitle) { currentPage = page; renderContent() }
+        val recentlyPlayed = tracksByIds(database.recentlyPlayedTrackIds()).take(4)
+        if (recentlyPlayed.isNotEmpty()) {
+            addHeading(body, "PICK UP WHERE YOU LEFT OFF", small = true)
+            recentlyPlayed.forEach { addTrackRow(body, it) }
         }
         val matching = filtered(tracks)
-        addHeading(body, "ALL TRACKS", small = true)
+        addHeading(body, "ALL SONGS  ·  ${matching.size}", small = true)
         if (matching.isEmpty()) {
             addEmpty(body, if (tracks.isEmpty()) "Your music will appear here once it is on this device." else "No tracks match your search.")
         } else {
@@ -680,7 +786,7 @@ class MainActivity : ComponentActivity() {
 
     private fun renderAlbum(body: LinearLayout, album: String, artist: String) {
         addBackHeader(body, "Album")
-        addCover(body, "♫", 128)
+        addCover(body, "♫", 128, album)
         addDetailTitle(body, album)
         addSimpleRow(body, artist, "Artist") {
             currentPage = Page.Artist(artist)
@@ -695,7 +801,7 @@ class MainActivity : ComponentActivity() {
     private fun renderTrackDetails(body: LinearLayout, id: Long) {
         val track = trackById(id) ?: return addEmpty(body, "This track is no longer available.")
         addBackHeader(body, "Track")
-        addCover(body, "♫", 144)
+        addCover(body, "♫", 144, track.album)
         addDetailTitle(body, track.title)
         addSimpleRow(body, track.artist, "Artist") {
             currentPage = Page.Artist(track.artist)
@@ -780,17 +886,110 @@ class MainActivity : ComponentActivity() {
 
     private fun renderNowPlaying(body: LinearLayout) {
         val track = currentTrack() ?: return addEmpty(body, "Choose a track to start listening.")
+        val duration = playbackDuration(track)
+        nowPlayingProgress = null
+        nowPlayingPosition = null
+        nowPlayingDuration = null
         addBackHeader(body, "Now playing")
-        addCover(body, "♫", 224)
+        addCover(body, "♫", 248, track.album)
+        TextView(this).apply {
+            text = "NOW PLAYING"
+            textSize = 11f
+            letterSpacing = 0.18f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(muted)
+            setPadding(0, dp(8), 0, dp(4))
+        }.also(body::addView)
         addDetailTitle(body, track.title)
         TextView(this).apply {
             text = "${track.artist}  ·  ${track.album}"
-            textSize = 14f
+            textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(muted)
             setOnClickListener { currentPage = Page.TrackDetails(track.id); renderContent() }
         }.also(body::addView)
-        addActionButton(body, "☷  View queue · ${queue.size} tracks") {
+
+        val seek = Slider(this).apply {
+            valueFrom = 0f
+            valueTo = duration.coerceAtLeast(1L).toFloat()
+            value = player.currentPosition.coerceIn(0L, duration).toFloat()
+            stepSize = 0f
+            addOnChangeListener { _, value, fromUser ->
+                if (fromUser) {
+                    player.seekTo(value.toLong())
+                    nowPlayingPosition?.text = formatTime(value.toLong())
+                }
+            }
+        }
+        nowPlayingProgress = seek
+        body.addView(seek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+            topMargin = dp(12)
+        })
+        val times = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        nowPlayingPosition = TextView(this).apply {
+            text = formatTime(player.currentPosition)
+            textSize = 12f
+            setTextColor(muted)
+        }
+        times.addView(nowPlayingPosition, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        nowPlayingDuration = TextView(this).apply {
+            text = formatTime(duration)
+            textSize = 12f
+            gravity = Gravity.END
+            setTextColor(muted)
+        }
+        times.addView(nowPlayingDuration)
+        body.addView(times)
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(8))
+        }
+        addPlayerControl(controls, "⤨", "Shuffle") {
+            player.shuffleModeEnabled = !player.shuffleModeEnabled
+            preferences.edit().putBoolean("shuffle", player.shuffleModeEnabled).apply()
+            renderContent()
+        }.setTextColor(if (player.shuffleModeEnabled) primary else muted)
+        addPlayerControl(controls, "|◀", "Previous track") {
+            player.seekToPrevious()
+            updatePlaybackProgress()
+        }
+        val play = MaterialButton(this).apply {
+            text = if (player.isPlaying) "Ⅱ" else "▶"
+            textSize = 22f
+            isAllCaps = false
+            setTextColor(if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(23, 32, 14) else Color.WHITE)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(primary)
+            cornerRadius = dp(36)
+            insetTop = 0
+            insetBottom = 0
+            setOnClickListener { togglePlayback(); text = if (player.isPlaying) "Ⅱ" else "▶" }
+        }
+        controls.addView(play, LinearLayout.LayoutParams(dp(68), dp(68)).apply {
+            setMargins(dp(8), 0, dp(8), 0)
+        })
+        addPlayerControl(controls, "▶|", "Next track") {
+            player.seekToNext()
+            updatePlaybackProgress()
+        }
+        addPlayerControl(controls, if (player.repeatMode == Player.REPEAT_MODE_ONE) "↻¹" else "↻", "Repeat") {
+            cycleRepeatMode()
+            renderContent()
+        }.setTextColor(if (player.repeatMode != Player.REPEAT_MODE_OFF) primary else muted)
+        body.addView(controls)
+
+        sleepTimerButton = addActionButton(
+            body,
+            if (sleepTimerEndsAt > System.currentTimeMillis()) "◷  Sleep timer · ${remainingSleepTime()}" else "◷  Sleep timer"
+        ) {
+            chooseSleepTimer()
+        }
+        addActionButton(body, "☷  Play queue · ${queue.size} tracks") {
             currentPage = Page.Queue
             renderContent()
         }
@@ -798,22 +997,27 @@ class MainActivity : ComponentActivity() {
             toggleFavorite(track.id)
             renderContent()
         }
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        listOf("|◀" to { player.seekToPrevious() }, (if (player.isPlaying) "Ⅱ" else "▶") to { togglePlayback() }, "▶|" to { player.seekToNext() }).forEach { (label, action) ->
-            val control = TextView(this).apply {
-                text = label
-                textSize = 22f
-                gravity = Gravity.CENTER
-                setTextColor(primary)
-                setOnClickListener { action() }
-            }
-            controls.addView(control, LinearLayout.LayoutParams(dp(72), dp(72)))
-        }
-        body.addView(controls)
+        addActionButton(body, "♫  Read lyrics") { showLyrics(track) }
         addActionButton(body, "✎  Edit tags & lyrics") { editTags(track) }
+        updatePlaybackProgress()
+    }
+
+    private fun addPlayerControl(
+        parent: LinearLayout,
+        label: String,
+        description: String,
+        action: () -> Unit
+    ): TextView {
+        val control = TextView(this).apply {
+            text = label
+            contentDescription = description
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(textColor)
+            setOnClickListener { action() }
+        }
+        parent.addView(control, LinearLayout.LayoutParams(dp(48), dp(56)))
+        return control
     }
 
     private fun addTrackRow(
@@ -840,8 +1044,8 @@ class MainActivity : ComponentActivity() {
             text = "♫"
             gravity = Gravity.CENTER
             textSize = 18f
-            setTextColor(this@MainActivity.background)
-            setBackgroundColor(primary)
+            setTextColor(Color.WHITE)
+            background = artworkBackground(track.album)
         }
         row.addView(cover, LinearLayout.LayoutParams(dp(44), dp(44)))
         val labels = LinearLayout(this).apply {
@@ -888,9 +1092,79 @@ class MainActivity : ComponentActivity() {
         }
         row.addView(more, LinearLayout.LayoutParams(dp(42), dp(48)))
         body.addView(row)
-        body.addView(View(this).apply { setBackgroundColor(Color.rgb(40, 45, 40)) }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
-        ))
+        body.addView(View(this).apply {
+            setBackgroundColor(if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(43, 48, 42) else Color.rgb(230, 232, 225))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+    }
+
+    private fun addHomeTile(
+        parent: LinearLayout,
+        icon: String,
+        title: String,
+        subtitle: String,
+        action: () -> Unit
+    ) {
+        val card = MaterialCardView(this).apply {
+            radius = dp(16).toFloat()
+            cardElevation = dp(1).toFloat()
+            setCardBackgroundColor(surface)
+            strokeWidth = dp(1)
+            strokeColor = if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(48, 54, 47) else Color.rgb(226, 229, 220)
+            setOnClickListener { action() }
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(10), dp(12))
+        }
+        content.addView(TextView(this).apply {
+            text = icon
+            textSize = 19f
+            setTextColor(primary)
+            gravity = Gravity.CENTER
+            background = roundedBackground(
+                if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(49, 60, 39) else Color.rgb(235, 242, 224),
+                dp(12)
+            )
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+        content.addView(TextView(this).apply {
+            text = title
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(textColor)
+            maxLines = 1
+            setPadding(0, dp(8), 0, dp(2))
+        })
+        content.addView(TextView(this).apply {
+            text = subtitle
+            textSize = 11f
+            setTextColor(muted)
+            maxLines = 1
+        })
+        card.addView(content)
+        parent.addView(card, LinearLayout.LayoutParams(0, dp(112), 1f).apply {
+            setMargins(0, dp(4), dp(8), dp(4))
+        })
+    }
+
+    private fun artworkBackground(seed: String): android.graphics.drawable.GradientDrawable {
+        val colors = listOf(
+            primary,
+            Color.rgb(110, 83, 156),
+            Color.rgb(45, 128, 134),
+            Color.rgb(192, 105, 76),
+            Color.rgb(74, 105, 160),
+            Color.rgb(169, 78, 104)
+        )
+        val index = (seed.lowercase().hashCode() and Int.MAX_VALUE) % colors.size
+        val first = colors[index]
+        val second = colors[(index + 2) % colors.size]
+        return android.graphics.drawable.GradientDrawable(
+            android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+            intArrayOf(first, second)
+        ).apply {
+            cornerRadius = dp(16).toFloat()
+        }
     }
 
     private fun addSimpleRow(
@@ -974,13 +1248,13 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun addCover(body: LinearLayout, symbol: String, size: Int) {
+    private fun addCover(body: LinearLayout, symbol: String, size: Int, seed: String = symbol) {
         val cover = TextView(this).apply {
             text = symbol
             textSize = 52f
             gravity = Gravity.CENTER
-            setTextColor(this@MainActivity.background)
-            background = roundedBackground(primary, dp(22))
+            setTextColor(Color.WHITE)
+            background = artworkBackground(seed)
         }
         body.addView(cover, LinearLayout.LayoutParams(dp(size), dp(size)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
@@ -989,18 +1263,26 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun addActionButton(body: LinearLayout, title: String, action: () -> Unit) {
-        val button = Button(this).apply {
+    private fun addActionButton(body: LinearLayout, title: String, action: () -> Unit): MaterialButton {
+        val button = MaterialButton(this).apply {
             text = title
             textSize = 14f
             setTextColor(textColor)
             isAllCaps = false
-            background = roundedBackground(surface, dp(12))
+            backgroundTintList = android.content.res.ColorStateList.valueOf(surface)
+            strokeWidth = dp(1)
+            strokeColor = android.content.res.ColorStateList.valueOf(
+                if (this@MainActivity.background == Color.rgb(17, 20, 17)) Color.rgb(49, 55, 48) else Color.rgb(226, 229, 220)
+            )
+            cornerRadius = dp(14)
+            insetTop = 0
+            insetBottom = 0
             setOnClickListener { action() }
         }
-        body.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply {
+        body.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply {
             topMargin = dp(7)
         })
+        return button
     }
 
     private fun addEditorField(
@@ -1422,6 +1704,87 @@ class MainActivity : ComponentActivity() {
         miniTitle.text = track?.title ?: "Nothing playing"
         miniArtist.text = track?.artist ?: "Choose a song to begin"
         miniPlay.text = if (player.isPlaying) "Ⅱ" else "▶"
+        updatePlaybackProgress()
+    }
+
+    private fun updatePlaybackProgress() {
+        if (!::miniProgress.isInitialized) return
+        val track = currentTrack()
+        val duration = track?.let(::playbackDuration) ?: 0L
+        val position = player.currentPosition.coerceAtLeast(0L)
+        miniProgress.progress = if (duration > 0L) {
+            ((position.toDouble() / duration) * miniProgress.max).toInt().coerceIn(0, miniProgress.max)
+        } else 0
+        nowPlayingProgress?.let { slider ->
+            if (!slider.isPressed) slider.value = position.coerceIn(0L, duration.coerceAtLeast(1L)).toFloat()
+        }
+        nowPlayingPosition?.text = formatTime(position)
+        nowPlayingDuration?.text = formatTime(duration)
+        if (sleepTimerEndsAt > 0L) {
+            if (System.currentTimeMillis() >= sleepTimerEndsAt) {
+                sleepTimerEndsAt = 0L
+                player.pause()
+                Toast.makeText(this, "Sleep timer ended. Playback paused.", Toast.LENGTH_LONG).show()
+                if (currentPage is Page.NowPlaying) renderContent()
+            } else {
+                sleepTimerButton?.text = "◷  Sleep timer · ${remainingSleepTime()}"
+            }
+        }
+    }
+
+    private fun playbackDuration(track: Track): Long =
+        player.duration.takeIf { it > 0L } ?: track.duration.coerceAtLeast(1L)
+
+    private fun formatTime(milliseconds: Long): String {
+        val seconds = milliseconds.coerceAtLeast(0L) / 1_000L
+        return "%d:%02d".format(seconds / 60, seconds % 60)
+    }
+
+    private fun remainingSleepTime(): String {
+        val seconds = ((sleepTimerEndsAt - System.currentTimeMillis()).coerceAtLeast(0L) + 999L) / 1_000L
+        return "%d:%02d".format(seconds / 60, seconds % 60)
+    }
+
+    private fun chooseSleepTimer() {
+        val options = arrayOf("Turn off", "15 minutes", "30 minutes", "45 minutes", "60 minutes", "90 minutes")
+        val minutes = listOf(0, 15, 30, 45, 60, 90)
+        AlertDialog.Builder(this)
+            .setTitle("Sleep timer")
+            .setItems(options) { _, index ->
+                sleepTimerEndsAt = if (minutes[index] == 0) 0L
+                else System.currentTimeMillis() + minutes[index] * 60_000L
+                Toast.makeText(
+                    this,
+                    if (minutes[index] == 0) "Sleep timer turned off."
+                    else "Playback will pause in ${minutes[index]} minutes.",
+                    Toast.LENGTH_SHORT
+                ).show()
+                renderContent()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showLyrics(track: Track) {
+        val lyrics = track.lyrics.trim()
+        val text = TextView(this).apply {
+            this.text = lyrics.ifBlank { "No lyrics saved for this track yet. Search for lyrics from the tag editor." }
+            textSize = 16f
+            setTextColor(textColor)
+            setPadding(dp(20), dp(8), dp(20), dp(12))
+        }
+        val scroll = ScrollView(this).apply {
+            addView(text)
+            isFillViewport = true
+        }
+        AlertDialog.Builder(this)
+            .setTitle("${track.title} · Lyrics")
+            .setView(scroll)
+            .setPositiveButton(if (lyrics.isBlank()) "Find lyrics" else "Done") { _, _ ->
+                if (lyrics.isBlank()) editTags(track)
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun editTags(track: Track) {

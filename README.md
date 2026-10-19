@@ -5,11 +5,13 @@ Lucy is a lightweight native Android music player for browsing and playing audio
 ## Features
 
 - Browse a device music library by track, artist, album, or playlist.
-- Play tracks, albums, and playlists, with a persistent in-app mini player and a now-playing screen.
+- Browse a personalized home screen with quick links to favorites, recent listening, new additions, and the playback queue.
+- Play tracks, albums, and playlists, with a persistent progress-aware mini player and a full now-playing screen with seek, previous/next, shuffle, and repeat controls.
+- Set a sleep timer to pause playback after 15, 30, 45, 60, or 90 minutes, and read saved lyrics while listening.
 - Manage the playback queue, play tracks next, and use shuffle and repeat controls.
 - Like tracks and browse smart playlists for liked, recently played, most played, and recently added songs.
 - Create playlists, add tracks, remove tracks, and play a selected collection.
-- Customize the theme, accent color, and library sort order in Settings.
+- Use a Material Design 2 interface with dark/light themes, accent colors, and library sorting in Settings.
 - Edit title, artist, album, lyrics, and file name together on one editor page.
 - Write tag and lyric changes into supported audio files, and rename them from the editor.
 - Search iTunes metadata by file name or current tags, and fetch plain or synced lyrics from LRCLIB.

@@ -28,6 +28,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.core.view.setPadding
 import androidx.media3.common.MediaItem
@@ -43,7 +44,8 @@ data class Track(
     val album: String,
     val duration: Long,
     val lyrics: String,
-    val displayName: String
+    val displayName: String,
+    val dateAdded: Long
 )
 
 private data class PendingTagEdit(val track: Track, val tags: TrackTags, val displayName: String)
@@ -60,23 +62,26 @@ private data class TrackEditorDraft(
 
 private sealed class Page {
     data object Library : Page()
+    data object Queue : Page()
     data object Artists : Page()
     data object Albums : Page()
     data object Playlists : Page()
+    data object Settings : Page()
     data class Artist(val name: String) : Page()
     data class Album(val name: String, val artist: String) : Page()
     data class TrackDetails(val id: Long) : Page()
     data class PlaylistDetails(val id: Long) : Page()
+    data class SmartPlaylist(val kind: String, val name: String) : Page()
     data class TrackEditor(val id: Long) : Page()
     data object NowPlaying : Page()
 }
 
 class MainActivity : ComponentActivity() {
-    private val background = Color.rgb(17, 20, 17)
-    private val surface = Color.rgb(29, 34, 29)
-    private val muted = Color.rgb(161, 170, 157)
-    private val primary = Color.rgb(190, 232, 111)
-    private val textColor = Color.rgb(241, 244, 237)
+    private var background = Color.rgb(17, 20, 17)
+    private var surface = Color.rgb(29, 34, 29)
+    private var muted = Color.rgb(161, 170, 157)
+    private var primary = Color.rgb(190, 232, 111)
+    private var textColor = Color.rgb(241, 244, 237)
 
     private lateinit var database: LibraryDatabase
     private lateinit var player: ExoPlayer
@@ -113,7 +118,9 @@ class MainActivity : ComponentActivity() {
         }
     private var tracks: List<Track> = emptyList()
     private var queue: List<Track> = emptyList()
+    private var favoriteIds: Set<Long> = emptySet()
     private var currentPage: Page = Page.Library
+    private var lastRecordedTrackId = -1L
     private var pendingTagEdit: PendingTagEdit? = null
     private var editorDraft: TrackEditorDraft? = null
     private lateinit var editorTitle: EditText
@@ -121,18 +128,42 @@ class MainActivity : ComponentActivity() {
     private lateinit var editorAlbum: EditText
     private lateinit var editorLyrics: EditText
     private lateinit var editorFileName: EditText
+    private val preferences by lazy { getSharedPreferences("lucy_settings", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setTheme(
+            when (preferences.getString("theme", "Dark")) {
+                "Light" -> R.style.AppThemeLight
+                "System" -> if (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+                    android.content.res.Configuration.UI_MODE_NIGHT_YES
+                ) R.style.AppTheme else R.style.AppThemeLight
+                else -> R.style.AppTheme
+            }
+        )
+        applyTheme()
         window.statusBarColor = background
         window.navigationBarColor = background
         database = LibraryDatabase(this)
+        favoriteIds = database.favoriteTrackIds().toSet()
         player = ExoPlayer.Builder(this).build()
+        player.shuffleModeEnabled = preferences.getBoolean("shuffle", false)
+        player.repeatMode = when (preferences.getString("repeat", "Off")) {
+            "One" -> Player.REPEAT_MODE_ONE
+            "All" -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) = updateMiniPlayer()
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 updateMiniPlayer()
+                currentTrack()?.let { track ->
+                    if (track.id != lastRecordedTrackId) {
+                        lastRecordedTrackId = track.id
+                        libraryExecutor.execute { database.recordPlay(track.id) }
+                    }
+                }
                 if (currentPage is Page.NowPlaying) renderContent()
             }
         })
@@ -204,26 +235,33 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8), 0, dp(8))
         }
-        listOf("Home", "Artists", "Albums", "Playlists").forEachIndexed { index, name ->
+        val tabsScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(tabs)
+        }
+        listOf("Home", "Queue", "Artists", "Albums", "Playlists", "Settings").forEachIndexed { index, name ->
             val tab = TextView(this).apply {
                 text = name
-                textSize = 13f
+                textSize = 12f
                 gravity = Gravity.CENTER
+                setPadding(dp(12), 0, dp(12), 0)
                 setTextColor(if (index == 0) primary else muted)
                 setOnClickListener {
                     currentPage = when (index) {
-                        1 -> Page.Artists
-                        2 -> Page.Albums
-                        3 -> Page.Playlists
+                        1 -> Page.Queue
+                        2 -> Page.Artists
+                        3 -> Page.Albums
+                        4 -> Page.Playlists
+                        5 -> Page.Settings
                         else -> Page.Library
                     }
                     renderContent()
                 }
             }
             tabViews += tab
-            tabs.addView(tab, LinearLayout.LayoutParams(0, dp(44), 1f))
+            tabs.addView(tab, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)))
         }
-        screen.addView(tabs)
+        screen.addView(tabsScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60)))
 
         content = FrameLayout(this)
         screen.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -296,7 +334,8 @@ class MainActivity : ComponentActivity() {
                     MediaStore.Audio.Media.ARTIST,
                     MediaStore.Audio.Media.ALBUM,
                     MediaStore.Audio.Media.DURATION,
-                    MediaStore.Audio.Media.DISPLAY_NAME
+                    MediaStore.Audio.Media.DISPLAY_NAME,
+                    MediaStore.Audio.Media.DATE_ADDED
                 )
                 val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
                 contentResolver.query(
@@ -312,6 +351,7 @@ class MainActivity : ComponentActivity() {
                     val albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                     val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idColumn)
                         val tags = overrides[id]
@@ -323,7 +363,8 @@ class MainActivity : ComponentActivity() {
                             album = tags?.album ?: cursor.getString(albumColumn).orEmpty().ifBlank { "Unknown album" },
                             duration = cursor.getLong(durationColumn),
                             lyrics = tags?.lyrics.orEmpty(),
-                            displayName = cursor.getString(displayNameColumn).orEmpty().ifBlank { "Unknown file" }
+                            displayName = cursor.getString(displayNameColumn).orEmpty().ifBlank { "Unknown file" },
+                            dateAdded = cursor.getLong(dateAddedColumn)
                         )
                     }
                 }
@@ -348,9 +389,11 @@ class MainActivity : ComponentActivity() {
         if (!::content.isInitialized) return
         content.removeAllViews()
         val selectedTab = when (currentPage) {
-            Page.Artists, is Page.Artist -> 1
-            Page.Albums, is Page.Album -> 2
-            Page.Playlists, is Page.PlaylistDetails -> 3
+            Page.Queue -> 1
+            Page.Artists, is Page.Artist -> 2
+            Page.Albums, is Page.Album -> 3
+            Page.Playlists, is Page.PlaylistDetails, is Page.SmartPlaylist -> 4
+            Page.Settings -> 5
             else -> 0
         }
         tabViews.forEachIndexed { index, tab -> tab.setTextColor(if (index == selectedTab) primary else muted) }
@@ -363,13 +406,16 @@ class MainActivity : ComponentActivity() {
         content.addView(scroll)
         when (val page = currentPage) {
             Page.Library -> renderLibrary(body)
+            Page.Queue -> renderQueue(body)
             Page.Artists -> renderArtists(body)
             Page.Albums -> renderAlbums(body)
             Page.Playlists -> renderPlaylists(body)
+            Page.Settings -> renderSettings(body)
             is Page.Artist -> renderArtist(body, page.name)
             is Page.Album -> renderAlbum(body, page.name, page.artist)
             is Page.TrackDetails -> renderTrackDetails(body, page.id)
             is Page.PlaylistDetails -> renderPlaylist(body, page.id)
+            is Page.SmartPlaylist -> renderSmartPlaylist(body, page.kind, page.name)
             is Page.TrackEditor -> renderTrackEditor(body, page.id)
             Page.NowPlaying -> renderNowPlaying(body)
         }
@@ -388,7 +434,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(muted)
         }.also(body::addView)
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("Artists" to Page.Artists, "Albums" to Page.Albums, "Playlists" to Page.Playlists).forEach { (label, page) ->
+        listOf("Artists" to Page.Artists, "Albums" to Page.Albums, "Queue" to Page.Queue).forEach { (label, page) ->
             val tile = TextView(this).apply {
                 text = "$label\n›"
                 textSize = 14f
@@ -402,12 +448,21 @@ class MainActivity : ComponentActivity() {
             actions.addView(tile, params)
         }
         body.addView(actions)
+        addHeading(body, "MADE FOR YOU", small = true)
+        listOf(
+            Triple("♥  Liked songs", "Your personal favorites", Page.SmartPlaylist("liked", "Liked songs")),
+            Triple("◷  Recently played", "Pick up where you left off", Page.SmartPlaylist("recent", "Recently played")),
+            Triple("↗  Most played", "Your all-time rotation", Page.SmartPlaylist("top", "Most played")),
+            Triple("✦  Recently added", "Fresh additions to your library", Page.SmartPlaylist("added", "Recently added"))
+        ).forEach { (title, subtitle, page) ->
+            addSimpleRow(body, title, subtitle) { currentPage = page; renderContent() }
+        }
         val matching = filtered(tracks)
         addHeading(body, "ALL TRACKS", small = true)
         if (matching.isEmpty()) {
             addEmpty(body, if (tracks.isEmpty()) "Your music will appear here once it is on this device." else "No tracks match your search.")
         } else {
-            matching.forEach { addTrackRow(body, it) }
+            sortTracks(matching).forEach { addTrackRow(body, it) }
         }
     }
 
@@ -438,6 +493,23 @@ class MainActivity : ComponentActivity() {
     private fun renderPlaylists(body: LinearLayout) {
         addBackHeader(body, "Playlists")
         addActionButton(body, "+  New playlist") { createPlaylist() }
+        addHeading(body, "YOUR COLLECTIONS", small = true)
+        addSimpleRow(body, "♥  Liked songs", "${favoriteIds.size} tracks") {
+            currentPage = Page.SmartPlaylist("liked", "Liked songs")
+            renderContent()
+        }
+        addHeading(body, "SMART PLAYLISTS", small = true)
+        listOf(
+            "recent" to ("Recently played" to "Last played first"),
+            "top" to ("Most played" to "Your most-played tracks"),
+            "added" to ("Recently added" to "Newest in your library")
+        ).forEach { (kind, details) ->
+            addSimpleRow(body, details.first, details.second) {
+                currentPage = Page.SmartPlaylist(kind, details.first)
+                renderContent()
+            }
+        }
+        addHeading(body, "YOUR PLAYLISTS", small = true)
         database.playlists().forEach { playlist ->
             addSimpleRow(body, playlist.name, "${database.trackIdsInPlaylist(playlist.id).size} tracks", "⋯") {
                 playlistActions(playlist)
@@ -449,6 +521,151 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (database.playlists().isEmpty()) addEmpty(body, "Create a playlist to collect your favorite tracks.")
+    }
+
+    private fun renderQueue(body: LinearLayout) {
+        addHeading(body, "UP NEXT")
+        addText(body, if (queue.isEmpty()) "Your queue is empty." else "${queue.size} tracks in your queue")
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        addCompactButton(controls, if (player.shuffleModeEnabled) "⤨ Shuffle on" else "⤨ Shuffle") {
+            player.shuffleModeEnabled = !player.shuffleModeEnabled
+            preferences.edit().putBoolean("shuffle", player.shuffleModeEnabled).apply()
+            renderContent()
+        }
+        addCompactButton(controls, repeatLabel()) {
+            cycleRepeatMode()
+            renderContent()
+        }
+        addCompactButton(controls, "Clear") {
+            AlertDialog.Builder(this)
+                .setMessage("Clear the playback queue?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Clear") { _, _ ->
+                    player.clearMediaItems()
+                    queue = emptyList()
+                    updateMiniPlayer()
+                    renderContent()
+                }
+                .show()
+        }
+        body.addView(controls)
+        val activeIndex = player.currentMediaItemIndex
+        if (queue.isEmpty()) {
+            addActionButton(body, "▶  Play all songs") { playTracks(sortTracks(tracks), 0) }
+            addActionButton(body, "+  Choose songs") { chooseTracksForQueue() }
+            return
+        }
+        queue.forEachIndexed { index, track ->
+            addTrackRow(
+                body,
+                track,
+                onClick = {
+                    player.seekTo(index, 0L)
+                    player.play()
+                    currentPage = Page.NowPlaying
+                    renderContent()
+                },
+                onMore = {
+                    AlertDialog.Builder(this)
+                        .setMessage("Remove “${track.title}” from the queue?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Remove") { _, _ ->
+                            queue = queue.toMutableList().also { it.removeAt(index) }
+                            if (index < player.mediaItemCount) player.removeMediaItem(index)
+                            updateMiniPlayer()
+                            renderContent()
+                        }
+                        .show()
+                },
+                playing = index == activeIndex
+            )
+        }
+        addActionButton(body, "+  Add songs to queue") { chooseTracksForQueue() }
+    }
+
+    private fun renderSmartPlaylist(body: LinearLayout, kind: String, name: String) {
+        addBackHeader(body, name)
+        val smartTracks = when (kind) {
+            "liked" -> tracksByIds(favoriteIds.toList())
+            "recent" -> tracksByIds(database.recentlyPlayedTrackIds())
+            "top" -> tracksByIds(database.mostPlayedTrackIds())
+            "added" -> tracks.sortedByDescending { it.dateAdded }
+            else -> emptyList()
+        }.let(::filtered)
+        addActionButton(body, "▶  Play all") { playTracks(smartTracks, 0) }
+        if (smartTracks.isEmpty()) {
+            addEmpty(body, when (kind) {
+                "liked" -> "Tap the heart beside any song to save it here."
+                "recent" -> "Your recently played tracks will show up here."
+                "top" -> "Your most-played tracks will show up here."
+                "added" -> "No tracks found."
+                else -> "No tracks found."
+            })
+        }
+        smartTracks.forEach { track ->
+            addTrackRow(
+                body,
+                track,
+                onMore = {
+                    if (kind == "liked") toggleFavorite(track.id)
+                    else trackActions(track)
+                    renderContent()
+                }
+            )
+        }
+    }
+
+    private fun renderSettings(body: LinearLayout) {
+        addHeading(body, "SETTINGS")
+        addText(body, "Make Lucy feel like yours.")
+        addHeading(body, "APPEARANCE", small = true)
+        addSimpleRow(body, "Theme", preferences.getString("theme", "Dark").orEmpty()) {
+            chooseSetting("Theme", arrayOf("Dark", "Light", "System"), preferences.getString("theme", "Dark")) {
+                preferences.edit().putString("theme", it).apply()
+                recreate()
+            }
+        }
+        addSimpleRow(body, "Accent color", preferences.getString("accent", "Lime").orEmpty()) {
+            chooseSetting("Accent color", arrayOf("Lime", "Ocean", "Rose"), preferences.getString("accent", "Lime")) {
+                preferences.edit().putString("accent", it).apply()
+                recreate()
+            }
+        }
+        addHeading(body, "LIBRARY", small = true)
+        addSimpleRow(body, "Sort songs", preferences.getString("sort", "Title").orEmpty()) {
+            chooseSetting("Sort songs by", arrayOf("Title", "Artist", "Recently added"), preferences.getString("sort", "Title")) {
+                preferences.edit().putString("sort", it).apply()
+                renderContent()
+            }
+        }
+        addSimpleRow(body, "Rescan music library", "Refresh tracks from this device") { loadTracks() }
+        addHeading(body, "PLAYBACK", small = true)
+        addSimpleRow(body, "Shuffle", if (player.shuffleModeEnabled) "On" else "Off") {
+            player.shuffleModeEnabled = !player.shuffleModeEnabled
+            preferences.edit().putBoolean("shuffle", player.shuffleModeEnabled).apply()
+            renderContent()
+        }
+        addSimpleRow(body, "Repeat", repeatLabel()) {
+            cycleRepeatMode()
+            renderContent()
+        }
+        addHeading(body, "PRIVACY & STORAGE", small = true)
+        addText(body, "Music playback and tag editing happen on this device. Only search terms are sent to iTunes or LRCLIB when you request a lookup.")
+        addSimpleRow(body, "Clear listening history", "Resets Recently played and Most played") {
+            AlertDialog.Builder(this)
+                .setMessage("Clear your listening history?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Clear") { _, _ ->
+                    database.clearPlayHistory()
+                    renderContent()
+                }
+                .show()
+        }
+        addHeading(body, "ABOUT", small = true)
+        addText(body, "Lucy  ·  Version 1.0  ·  Android 6.0 and newer")
     }
 
     private fun renderArtist(body: LinearLayout, artist: String) {
@@ -472,7 +689,7 @@ class MainActivity : ComponentActivity() {
         val albumTracks = filtered(tracks.filter { it.album == album && it.artist == artist })
         addActionButton(body, "▶  Play album") { playTracks(albumTracks, 0) }
         addHeading(body, "TRACKS  ·  ${albumTracks.size}", small = true)
-        albumTracks.forEach { addTrackRow(body, it) }
+        sortTracks(albumTracks).forEach { addTrackRow(body, it) }
     }
 
     private fun renderTrackDetails(body: LinearLayout, id: Long) {
@@ -489,6 +706,11 @@ class MainActivity : ComponentActivity() {
             renderContent()
         }
         addActionButton(body, "▶  Play track") { playTracks(tracks, tracks.indexOf(track)) }
+        addActionButton(body, if (track.id in favoriteIds) "♥  Liked" else "♡  Add to liked songs") {
+            toggleFavorite(track.id)
+            renderContent()
+        }
+        addActionButton(body, "+  Add to queue") { addToQueue(track) }
         addActionButton(body, "✎  Edit tags & lyrics") { editTags(track) }
         addActionButton(body, "＋  Add to playlist") { choosePlaylist(track) }
     }
@@ -568,6 +790,14 @@ class MainActivity : ComponentActivity() {
             setTextColor(muted)
             setOnClickListener { currentPage = Page.TrackDetails(track.id); renderContent() }
         }.also(body::addView)
+        addActionButton(body, "☷  View queue · ${queue.size} tracks") {
+            currentPage = Page.Queue
+            renderContent()
+        }
+        addActionButton(body, if (track.id in favoriteIds) "♥  Liked" else "♡  Add to liked songs") {
+            toggleFavorite(track.id)
+            renderContent()
+        }
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -590,7 +820,8 @@ class MainActivity : ComponentActivity() {
         body: LinearLayout,
         track: Track,
         onClick: (() -> Unit)? = null,
-        onMore: (() -> Unit)? = null
+        onMore: (() -> Unit)? = null,
+        playing: Boolean = false
     ) {
         val row = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -618,9 +849,9 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), 0, dp(4), 0)
         }
         labels.addView(TextView(this).apply {
-            text = track.title
+            text = (if (playing) "♫  " else "") + track.title
             textSize = 15f
-            setTextColor(textColor)
+            setTextColor(if (playing) primary else textColor)
             maxLines = 1
         })
         labels.addView(TextView(this).apply {
@@ -630,6 +861,21 @@ class MainActivity : ComponentActivity() {
             maxLines = 1
         })
         row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val favorite = TextView(this).apply {
+            text = if (track.id in favoriteIds) "♥" else "♡"
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(if (track.id in favoriteIds) primary else muted)
+            setOnClickListener {
+                val liked = toggleFavorite(track.id)
+                text = if (liked) "♥" else "♡"
+                setTextColor(if (liked) primary else muted)
+                if ((currentPage as? Page.SmartPlaylist)?.kind == "liked" && !liked) {
+                    renderContent()
+                }
+            }
+        }
+        row.addView(favorite, LinearLayout.LayoutParams(dp(40), dp(48)))
         val more = TextView(this).apply {
             text = "⋮"
             textSize = 22f
@@ -809,6 +1055,46 @@ class MainActivity : ComponentActivity() {
         })
     }
 
+    private fun addText(body: LinearLayout, message: String) {
+        body.addView(TextView(this).apply {
+            text = message
+            textSize = 13f
+            setTextColor(muted)
+            setPadding(dp(8), dp(6), dp(8), dp(10))
+        })
+    }
+
+    private fun addCompactButton(parent: LinearLayout, label: String, action: () -> Unit) {
+        val button = TextView(this).apply {
+            text = label
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTextColor(textColor)
+            background = roundedBackground(surface, dp(12))
+            setOnClickListener { action() }
+        }
+        parent.addView(button, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+            setMargins(0, dp(8), dp(6), dp(8))
+        })
+    }
+
+    private fun chooseSetting(
+        title: String,
+        options: Array<String>,
+        selected: String?,
+        onSelected: (String) -> Unit
+    ) {
+        val checked = options.indexOf(selected).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(options, checked) { dialog, index ->
+                onSelected(options[index])
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun filtered(source: List<Track>): List<Track> {
         val needle = search.text?.toString()?.trim().orEmpty()
         if (needle.isEmpty()) return source
@@ -817,15 +1103,68 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun sortTracks(source: List<Track>): List<Track> =
+        when (preferences.getString("sort", "Title")) {
+            "Artist" -> source.sortedWith(compareBy<Track> { it.artist.lowercase() }.thenBy { it.title.lowercase() })
+            "Recently added" -> source.sortedByDescending { it.dateAdded }
+            else -> source.sortedBy { it.title.lowercase() }
+        }
+
+    private fun tracksByIds(ids: List<Long>): List<Track> {
+        val byId = tracks.associateBy { it.id }
+        return ids.mapNotNull(byId::get)
+    }
+
+    private fun repeatLabel(): String = when (player.repeatMode) {
+        Player.REPEAT_MODE_ONE -> "↻  Repeat one"
+        Player.REPEAT_MODE_ALL -> "↻  Repeat all"
+        else -> "↻  Repeat off"
+    }
+
+    private fun cycleRepeatMode() {
+        player.repeatMode = when (player.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
+        }
+        preferences.edit().putString(
+            "repeat",
+            when (player.repeatMode) {
+                Player.REPEAT_MODE_ONE -> "One"
+                Player.REPEAT_MODE_ALL -> "All"
+                else -> "Off"
+            }
+        ).apply()
+    }
+
+    private fun applyTheme() {
+        val isDark = when (preferences.getString("theme", "Dark")) {
+            "Light" -> false
+            "System" -> resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+            else -> true
+        }
+        background = if (isDark) Color.rgb(17, 20, 17) else Color.rgb(246, 247, 242)
+        surface = if (isDark) Color.rgb(29, 34, 29) else Color.WHITE
+        muted = if (isDark) Color.rgb(161, 170, 157) else Color.rgb(104, 111, 101)
+        textColor = if (isDark) Color.rgb(241, 244, 237) else Color.rgb(29, 34, 29)
+        primary = when (preferences.getString("accent", "Lime")) {
+            "Ocean" -> Color.rgb(101, 190, 238)
+            "Rose" -> Color.rgb(241, 132, 161)
+            else -> if (isDark) Color.rgb(190, 232, 111) else Color.rgb(92, 132, 38)
+        }
+    }
+
     private fun trackById(id: Long): Track? = tracks.firstOrNull { it.id == id }
 
     private fun goBack() {
         currentPage = when (val page = currentPage) {
-            Page.Artists, Page.Albums, Page.Playlists -> Page.Library
+            Page.Queue, Page.Artists, Page.Albums, Page.Playlists, Page.Settings -> Page.Library
             is Page.Artist -> Page.Artists
             is Page.Album -> Page.Albums
             is Page.TrackDetails -> Page.Library
             is Page.PlaylistDetails -> Page.Playlists
+            is Page.SmartPlaylist -> Page.Playlists
             is Page.TrackEditor -> Page.TrackDetails(page.id)
             Page.NowPlaying -> currentTrack()?.let { Page.TrackDetails(it.id) } ?: Page.Library
             Page.Library -> Page.Library
@@ -1005,12 +1344,6 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this, "Tags, lyrics, and file name saved to the audio file.", Toast.LENGTH_LONG).show()
                     loadTracks()
                 }
-            } catch (error: RecoverableSecurityException) {
-                runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    val request = IntentSenderRequest.Builder(error.userAction.actionIntent.intentSender).build()
-                    writeRequestLauncher.launch(request)
-                }
             } catch (error: java.io.IOException) {
                 showFileEditError(error)
             } catch (error: org.jaudiotagger.audio.exceptions.CannotReadException) {
@@ -1024,8 +1357,21 @@ class MainActivity : ComponentActivity() {
             } catch (error: org.jaudiotagger.tag.TagException) {
                 showFileEditError(error)
             } catch (error: SecurityException) {
-                showFileEditError(error)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && error is RecoverableSecurityException) {
+                    requestRecoverableWrite(error)
+                } else {
+                    showFileEditError(error)
+                }
             }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun requestRecoverableWrite(error: RecoverableSecurityException) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val request = IntentSenderRequest.Builder(error.userAction.actionIntent.intentSender).build()
+            writeRequestLauncher.launch(request)
         }
     }
 
@@ -1083,15 +1429,61 @@ class MainActivity : ComponentActivity() {
         renderContent()
     }
 
+    private fun toggleFavorite(trackId: Long): Boolean {
+        val liked = database.toggleFavorite(trackId)
+        favoriteIds = if (liked) favoriteIds + trackId else favoriteIds - trackId
+        return liked
+    }
+
     private fun trackActions(track: Track) {
+        val liked = track.id in favoriteIds
         AlertDialog.Builder(this)
             .setTitle(track.title)
-            .setItems(arrayOf("Play next", "Add to playlist", "Edit tags & lyrics")) { _, which ->
+            .setItems(arrayOf(
+                "Play next",
+                "Add to queue",
+                if (liked) "Remove from liked songs" else "Add to liked songs",
+                "Add to playlist",
+                "Edit tags & lyrics"
+            )) { _, which ->
                 when (which) {
                     0 -> playNext(track)
-                    1 -> choosePlaylist(track)
-                    2 -> editTags(track)
+                    1 -> addToQueue(track)
+                    2 -> toggleFavorite(track.id).also { renderContent() }
+                    3 -> choosePlaylist(track)
+                    4 -> editTags(track)
                 }
+            }
+            .show()
+    }
+
+    private fun addToQueue(track: Track) {
+        if (player.mediaItemCount == 0) {
+            playTracks(listOf(track), 0)
+            return
+        }
+        queue = queue + track
+        player.addMediaItem(MediaItem.fromUri(track.uri))
+        Toast.makeText(this, "Added to queue.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun chooseTracksForQueue() {
+        if (tracks.isEmpty()) {
+            Toast.makeText(this, "No tracks are available.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val checked = BooleanArray(tracks.size)
+        AlertDialog.Builder(this)
+            .setTitle("Add to queue")
+            .setMultiChoiceItems(tracks.map { "${it.title} — ${it.artist}" }.toTypedArray(), checked) { _, index, selected ->
+                checked[index] = selected
+            }
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Add selected") { _, _ ->
+                val selectedTracks = tracks.filterIndexed { index, _ -> checked[index] }
+                selectedTracks.forEach(::addToQueue)
+                currentPage = Page.Queue
+                renderContent()
             }
             .show()
     }

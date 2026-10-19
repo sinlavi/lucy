@@ -8,7 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper
 data class TrackTags(val title: String, val artist: String, val album: String, val lyrics: String)
 data class Playlist(val id: Long, val name: String)
 
-class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "lucy.db", null, 1) {
+class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "lucy.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -32,10 +32,33 @@ class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "lucy.db", n
             )
             """.trimIndent()
         )
+        db.execSQL("CREATE TABLE favorites (track_id INTEGER PRIMARY KEY)")
+        db.execSQL(
+            """
+            CREATE TABLE play_history (
+                track_id INTEGER PRIMARY KEY,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
         db.execSQL("PRAGMA foreign_keys=ON")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("CREATE TABLE favorites (track_id INTEGER PRIMARY KEY)")
+            db.execSQL(
+                """
+                CREATE TABLE play_history (
+                    track_id INTEGER PRIMARY KEY,
+                    play_count INTEGER NOT NULL DEFAULT 0,
+                    last_played INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+        }
+    }
 
     fun tagsFor(trackId: Long): TrackTags? =
         readableDatabase.query(
@@ -140,6 +163,83 @@ class LibraryDatabase(context: Context) : SQLiteOpenHelper(context, "lucy.db", n
                 while (cursor.moveToNext()) add(cursor.getLong(0))
             }
         }
+
+    fun isFavorite(trackId: Long): Boolean =
+        readableDatabase.query(
+            "favorites",
+            arrayOf("track_id"),
+            "track_id=?",
+            arrayOf(trackId.toString()),
+            null,
+            null,
+            null,
+            "1"
+        ).use { it.moveToFirst() }
+
+    fun toggleFavorite(trackId: Long): Boolean {
+        val db = writableDatabase
+        return if (isFavorite(trackId)) {
+            db.delete("favorites", "track_id=?", arrayOf(trackId.toString()))
+            false
+        } else {
+            db.insertOrThrow("favorites", null, ContentValues().apply { put("track_id", trackId) })
+            true
+        }
+    }
+
+    fun favoriteTrackIds(): List<Long> = trackIdsFrom("favorites", "track_id", "track_id")
+
+    fun recordPlay(trackId: Long, playedAt: Long = System.currentTimeMillis()) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val alreadyRecorded = db.query(
+                "play_history",
+                arrayOf("track_id"),
+                "track_id=?",
+                arrayOf(trackId.toString()),
+                null,
+                null,
+                null,
+                "1"
+            ).use { it.moveToFirst() }
+            if (alreadyRecorded) {
+                db.execSQL(
+                    "UPDATE play_history SET play_count=play_count+1, last_played=? WHERE track_id=?",
+                    arrayOf(playedAt, trackId)
+                )
+            } else {
+                db.insertOrThrow(
+                    "play_history",
+                    null,
+                    ContentValues().apply {
+                        put("track_id", trackId)
+                        put("play_count", 1)
+                        put("last_played", playedAt)
+                    }
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun recentlyPlayedTrackIds(): List<Long> = trackIdsFrom("play_history", "track_id", "last_played DESC")
+
+    fun mostPlayedTrackIds(): List<Long> = trackIdsFrom("play_history", "track_id", "play_count DESC, last_played DESC")
+
+    fun clearPlayHistory() {
+        writableDatabase.delete("play_history", null, null)
+    }
+
+    private fun trackIdsFrom(table: String, column: String, orderBy: String): List<Long> =
+        readableDatabase.query(table, arrayOf(column), null, null, null, null, orderBy)
+            .use { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) add(cursor.getLong(0))
+                }
+            }
 }
 
 private object DatabaseUtilsCompat {

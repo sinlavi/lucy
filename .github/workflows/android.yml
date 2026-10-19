@@ -8,9 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -22,10 +28,15 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build APKs
-        run: ./gradlew --no-daemon assembleDebug assembleRelease
+        run: ./gradlew --build-cache --parallel assembleDebug assembleRelease
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
@@ -35,3 +46,4 @@ jobs:
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+          retention-days: 7

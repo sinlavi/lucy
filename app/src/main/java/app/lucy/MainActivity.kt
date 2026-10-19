@@ -1,7 +1,9 @@
 package app.lucy
 
 import android.Manifest
+import android.app.Activity
 import android.app.AlertDialog
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.database.Cursor
@@ -24,6 +26,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.setPadding
@@ -39,7 +42,20 @@ data class Track(
     val artist: String,
     val album: String,
     val duration: Long,
-    val lyrics: String
+    val lyrics: String,
+    val displayName: String
+)
+
+private data class PendingTagEdit(val track: Track, val tags: TrackTags, val displayName: String)
+private data class TrackEditorDraft(
+    val trackId: Long,
+    var displayName: String,
+    var title: String,
+    var artist: String,
+    var album: String,
+    var lyrics: String,
+    var lyricsRead: Boolean = false,
+    var lyricsEdited: Boolean = false
 )
 
 private sealed class Page {
@@ -51,7 +67,7 @@ private sealed class Page {
     data class Album(val name: String, val artist: String) : Page()
     data class TrackDetails(val id: Long) : Page()
     data class PlaylistDetails(val id: Long) : Page()
-    data class Lyrics(val id: Long) : Page()
+    data class TrackEditor(val id: Long) : Page()
     data object NowPlaying : Page()
 }
 
@@ -72,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var search: EditText
     private val tabViews = mutableListOf<TextView>()
     private val libraryExecutor = Executors.newSingleThreadExecutor()
+    private val metadataExecutor = Executors.newSingleThreadExecutor()
     private val audioPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) loadTracks()
         else {
@@ -79,9 +96,31 @@ class MainActivity : ComponentActivity() {
             renderContent()
         }
     }
+    private val writePermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) savePendingTagEdit()
+        else {
+            pendingTagEdit = null
+            Toast.makeText(this, "Storage write permission is required to edit this file.", Toast.LENGTH_LONG).show()
+        }
+    }
+    private val writeRequestLauncher =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) savePendingTagEdit()
+            else {
+                pendingTagEdit = null
+                Toast.makeText(this, "File changes were not approved.", Toast.LENGTH_SHORT).show()
+            }
+        }
     private var tracks: List<Track> = emptyList()
     private var queue: List<Track> = emptyList()
     private var currentPage: Page = Page.Library
+    private var pendingTagEdit: PendingTagEdit? = null
+    private var editorDraft: TrackEditorDraft? = null
+    private lateinit var editorTitle: EditText
+    private lateinit var editorArtist: EditText
+    private lateinit var editorAlbum: EditText
+    private lateinit var editorLyrics: EditText
+    private lateinit var editorFileName: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +148,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         libraryExecutor.execute { database.close() }
         libraryExecutor.shutdown()
+        metadataExecutor.shutdownNow()
         player.release()
         super.onDestroy()
     }
@@ -255,7 +295,8 @@ class MainActivity : ComponentActivity() {
                     MediaStore.Audio.Media.TITLE,
                     MediaStore.Audio.Media.ARTIST,
                     MediaStore.Audio.Media.ALBUM,
-                    MediaStore.Audio.Media.DURATION
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.DISPLAY_NAME
                 )
                 val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
                 contentResolver.query(
@@ -270,6 +311,7 @@ class MainActivity : ComponentActivity() {
                     val artistColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
                     val albumColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                    val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idColumn)
                         val tags = overrides[id]
@@ -280,7 +322,8 @@ class MainActivity : ComponentActivity() {
                             artist = tags?.artist ?: cursor.getString(artistColumn).orEmpty().ifBlank { "Unknown artist" },
                             album = tags?.album ?: cursor.getString(albumColumn).orEmpty().ifBlank { "Unknown album" },
                             duration = cursor.getLong(durationColumn),
-                            lyrics = tags?.lyrics.orEmpty()
+                            lyrics = tags?.lyrics.orEmpty(),
+                            displayName = cursor.getString(displayNameColumn).orEmpty().ifBlank { "Unknown file" }
                         )
                     }
                 }
@@ -327,7 +370,7 @@ class MainActivity : ComponentActivity() {
             is Page.Album -> renderAlbum(body, page.name, page.artist)
             is Page.TrackDetails -> renderTrackDetails(body, page.id)
             is Page.PlaylistDetails -> renderPlaylist(body, page.id)
-            is Page.Lyrics -> renderLyrics(body, page.id)
+            is Page.TrackEditor -> renderTrackEditor(body, page.id)
             Page.NowPlaying -> renderNowPlaying(body)
         }
     }
@@ -446,11 +489,7 @@ class MainActivity : ComponentActivity() {
             renderContent()
         }
         addActionButton(body, "▶  Play track") { playTracks(tracks, tracks.indexOf(track)) }
-        addActionButton(body, "✎  Edit tags") { editTags(track) }
-        addActionButton(body, "♫  View lyrics") {
-            currentPage = Page.Lyrics(track.id)
-            renderContent()
-        }
+        addActionButton(body, "✎  Edit tags & lyrics") { editTags(track) }
         addActionButton(body, "＋  Add to playlist") { choosePlaylist(track) }
     }
 
@@ -478,27 +517,43 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun renderLyrics(body: LinearLayout, id: Long) {
+    private fun renderTrackEditor(body: LinearLayout, id: Long) {
         val track = trackById(id) ?: return addEmpty(body, "This track is no longer available.")
-        addBackHeader(body, "Lyrics")
-        addDetailTitle(body, track.title)
-        TextView(this).apply {
-            text = track.artist
-            textSize = 14f
-            setTextColor(muted)
-        }.also(body::addView)
-        if (track.lyrics.isBlank()) {
-            addEmpty(body, "No lyrics saved for this track yet.")
-        } else {
-            TextView(this).apply {
-                text = track.lyrics
-                textSize = 18f
-                setTextColor(textColor)
-                setLineSpacing(dp(5).toFloat(), 1f)
-                setPadding(0, dp(28), 0, dp(20))
-            }.also(body::addView)
+        if (editorDraft?.trackId != id) {
+            editorDraft = TrackEditorDraft(id, track.displayName, track.title, track.artist, track.album, track.lyrics)
         }
-        addActionButton(body, "✎  Edit tags & lyrics") { editTags(track) }
+        val draft = requireNotNull(editorDraft)
+        addBackHeader(body, "Edit track")
+        addEmpty(body, "Changes are written to the audio file. Lucy may ask you to approve file access.")
+        editorFileName = addEditorField(body, "File name", draft.displayName)
+        editorTitle = addEditorField(body, "Title", draft.title)
+        editorArtist = addEditorField(body, "Artist", draft.artist)
+        editorAlbum = addEditorField(body, "Album", draft.album)
+        editorLyrics = addEditorField(body, "Lyrics (plain text or LRC)", draft.lyrics, multiline = true)
+        bindEditorField(editorFileName) { draft.displayName = it }
+        bindEditorField(editorTitle) { draft.title = it }
+        bindEditorField(editorArtist) { draft.artist = it }
+        bindEditorField(editorAlbum) { draft.album = it }
+        bindEditorField(editorLyrics) {
+            draft.lyrics = it
+            draft.lyricsEdited = true
+        }
+        if (draft.lyrics.isBlank() && !draft.lyricsRead) {
+            draft.lyricsRead = true
+            readEmbeddedLyrics(track)
+        }
+        addActionButton(body, "Find metadata by file name · iTunes") {
+            lookupItunes(editorFileName.text.toString().substringBeforeLast('.', editorFileName.text.toString()))
+        }
+        addActionButton(body, "Find metadata by current tags · iTunes") {
+            val query = listOf(editorTitle.text, editorArtist.text, editorAlbum.text)
+                .map { it.toString().trim() }
+                .filter(String::isNotBlank)
+                .joinToString(" ")
+            lookupItunes(query)
+        }
+        addActionButton(body, "Fetch lyrics · LRCLIB") { lookupLyrics(track) }
+        addActionButton(body, "Save tags, lyrics & file name") { saveEditor(track) }
     }
 
     private fun renderNowPlaying(body: LinearLayout) {
@@ -528,8 +583,7 @@ class MainActivity : ComponentActivity() {
             controls.addView(control, LinearLayout.LayoutParams(dp(72), dp(72)))
         }
         body.addView(controls)
-        addActionButton(body, "♫  View lyrics") { currentPage = Page.Lyrics(track.id); renderContent() }
-        addActionButton(body, "✎  Edit tags") { editTags(track) }
+        addActionButton(body, "✎  Edit tags & lyrics") { editTags(track) }
     }
 
     private fun addTrackRow(
@@ -703,6 +757,49 @@ class MainActivity : ComponentActivity() {
         })
     }
 
+    private fun addEditorField(
+        body: LinearLayout,
+        label: String,
+        value: String,
+        multiline: Boolean = false
+    ): EditText {
+        body.addView(TextView(this).apply {
+            text = label
+            textSize = 12f
+            setTextColor(muted)
+            setPadding(0, dp(12), 0, dp(5))
+        })
+        return EditText(this).apply {
+            setText(value)
+            hint = label
+            textSize = 15f
+            setTextColor(textColor)
+            setHintTextColor(muted)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = roundedBackground(surface, dp(10))
+            if (multiline) {
+                minLines = 5
+                gravity = Gravity.TOP
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            } else {
+                setSingleLine(true)
+            }
+            body.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
+
+    private fun bindEditorField(field: EditText, onChange: (String) -> Unit) {
+        field.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                onChange(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+    }
+
     private fun addEmpty(body: LinearLayout, message: String) {
         body.addView(TextView(this).apply {
             text = message
@@ -729,11 +826,220 @@ class MainActivity : ComponentActivity() {
             is Page.Album -> Page.Albums
             is Page.TrackDetails -> Page.Library
             is Page.PlaylistDetails -> Page.Playlists
-            is Page.Lyrics -> if (player.mediaItemCount > 0 && currentTrack()?.id == page.id) Page.TrackDetails(page.id) else Page.Library
+            is Page.TrackEditor -> Page.TrackDetails(page.id)
             Page.NowPlaying -> currentTrack()?.let { Page.TrackDetails(it.id) } ?: Page.Library
             Page.Library -> Page.Library
         }
         renderContent()
+    }
+
+    private fun lookupItunes(term: String) {
+        val trackId = (currentPage as? Page.TrackEditor)?.id ?: return
+        val query = term.trim()
+        if (query.isBlank()) {
+            Toast.makeText(this, "Enter a file name or tags to search.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Toast.makeText(this, "Searching iTunes…", Toast.LENGTH_SHORT).show()
+        metadataExecutor.execute {
+            try {
+                val results = MetadataLookup.searchItunes(query)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || currentPage != Page.TrackEditor(trackId)) return@runOnUiThread
+                    if (results.isEmpty()) {
+                        Toast.makeText(this, "iTunes found no matching tracks.", Toast.LENGTH_LONG).show()
+                    } else {
+                        val labels = results.map { candidate ->
+                            listOf(candidate.title, candidate.artist, candidate.album)
+                                .filter(String::isNotBlank)
+                                .joinToString(" — ")
+                        }.toTypedArray()
+                        AlertDialog.Builder(this)
+                            .setTitle("Choose iTunes metadata")
+                            .setItems(labels) { _, index ->
+                                val candidate = results[index]
+                                editorTitle.setText(candidate.title)
+                                editorArtist.setText(candidate.artist)
+                                editorAlbum.setText(candidate.album)
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                    }
+                }
+            } catch (error: java.io.IOException) {
+                showLookupError("iTunes", error)
+            } catch (error: org.json.JSONException) {
+                showLookupError("iTunes", error)
+            }
+        }
+    }
+
+    private fun lookupLyrics(track: Track) {
+        if (currentPage != Page.TrackEditor(track.id)) return
+        val title = editorTitle.text.toString().trim()
+        val artist = editorArtist.text.toString().trim()
+        val album = editorAlbum.text.toString().trim()
+        if (title.isBlank() || artist.isBlank()) {
+            Toast.makeText(this, "Enter a track title and artist before searching lyrics.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Searching LRCLIB…", Toast.LENGTH_SHORT).show()
+        metadataExecutor.execute {
+            try {
+                val results = MetadataLookup.searchLyrics(title, artist, album, track.duration)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || currentPage != Page.TrackEditor(track.id)) return@runOnUiThread
+                    when (results.size) {
+                        0 -> Toast.makeText(this, "LRCLIB has no matching lyrics.", Toast.LENGTH_LONG).show()
+                        1 -> applyLyrics(results[0])
+                        else -> {
+                            val labels = results.map { "${it.title} — ${it.artist}${if (it.album.isBlank()) "" else " · ${it.album}"}" }.toTypedArray()
+                            AlertDialog.Builder(this)
+                                .setTitle("Choose lyrics")
+                                .setItems(labels) { _, index -> applyLyrics(results[index]) }
+                                .setNegativeButton("Cancel", null)
+                                .show()
+                        }
+                    }
+                }
+            } catch (error: java.io.IOException) {
+                showLookupError("LRCLIB", error)
+            } catch (error: org.json.JSONException) {
+                showLookupError("LRCLIB", error)
+            }
+        }
+    }
+
+    private fun applyLyrics(candidate: LyricsCandidate) {
+        editorLyrics.setText(candidate.lyrics)
+        Toast.makeText(this, "Lyrics loaded. Save to write them into the audio file.", Toast.LENGTH_LONG).show()
+    }
+
+    private fun readEmbeddedLyrics(track: Track) {
+        libraryExecutor.execute {
+            try {
+                val lyrics = AudioFileEditor.readLyrics(contentResolver, cacheDir, track)
+                if (lyrics.isBlank()) return@execute
+                runOnUiThread {
+                    val page = currentPage as? Page.TrackEditor
+                    if (!isFinishing && !isDestroyed && page?.id == track.id &&
+                        editorLyrics.text.isBlank() && editorDraft?.lyricsEdited == false
+                    ) {
+                        editorLyrics.setText(lyrics)
+                    }
+                }
+            } catch (error: java.io.IOException) {
+                showLookupError("Audio tag read", error)
+            } catch (error: org.jaudiotagger.audio.exceptions.CannotReadException) {
+                showLookupError("Audio tag read", error)
+            } catch (error: org.jaudiotagger.audio.exceptions.InvalidAudioFrameException) {
+                showLookupError("Audio tag read", error)
+            } catch (error: org.jaudiotagger.audio.exceptions.ReadOnlyFileException) {
+                showLookupError("Audio tag read", error)
+            } catch (error: org.jaudiotagger.tag.TagException) {
+                showLookupError("Audio tag read", error)
+            }
+        }
+    }
+
+    private fun showLookupError(provider: String, error: Exception) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val detail = error.message?.takeIf(String::isNotBlank) ?: "Please try again."
+            Toast.makeText(this, "$provider failed: $detail", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun saveEditor(track: Track) {
+        if (pendingTagEdit != null) {
+            Toast.makeText(this, "A file edit is already in progress.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val newName = editorFileName.text.toString().trim()
+        val oldExtension = track.displayName.substringAfterLast('.', "").lowercase()
+        val newExtension = newName.substringAfterLast('.', "").lowercase()
+        if (newName.isBlank() || newName.contains('/') || newName.contains('\\') ||
+            newName.any(Char::isISOControl) || oldExtension.isBlank() || newExtension != oldExtension
+        ) {
+            Toast.makeText(this, "Use a file name without a path and keep the original .$oldExtension extension.", Toast.LENGTH_LONG).show()
+            return
+        }
+        pendingTagEdit = PendingTagEdit(
+            track = track,
+            tags = TrackTags(
+                editorTitle.text.toString().trim(),
+                editorArtist.text.toString().trim(),
+                editorAlbum.text.toString().trim(),
+                editorLyrics.text.toString()
+            ),
+            displayName = newName
+        )
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                try {
+                    val request = MediaStore.createWriteRequest(contentResolver, listOf(track.uri))
+                    writeRequestLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+                } catch (error: SecurityException) {
+                    pendingTagEdit = null
+                    Toast.makeText(this, "Android could not request permission to edit this file.", Toast.LENGTH_LONG).show()
+                }
+            }
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ->
+                writePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            else -> savePendingTagEdit()
+        }
+    }
+
+    private fun savePendingTagEdit() {
+        val edit = pendingTagEdit ?: return
+        libraryExecutor.execute {
+            try {
+                AudioFileEditor.save(contentResolver, cacheDir, edit.track, edit.tags, edit.displayName)
+                database.saveTags(edit.track.id, edit.tags)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    pendingTagEdit = null
+                    editorDraft?.displayName = edit.displayName
+                    editorFileName.setText(edit.displayName)
+                    Toast.makeText(this, "Tags, lyrics, and file name saved to the audio file.", Toast.LENGTH_LONG).show()
+                    loadTracks()
+                }
+            } catch (error: RecoverableSecurityException) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    val request = IntentSenderRequest.Builder(error.userAction.actionIntent.intentSender).build()
+                    writeRequestLauncher.launch(request)
+                }
+            } catch (error: java.io.IOException) {
+                showFileEditError(error)
+            } catch (error: org.jaudiotagger.audio.exceptions.CannotReadException) {
+                showFileEditError(error)
+            } catch (error: org.jaudiotagger.audio.exceptions.CannotWriteException) {
+                showFileEditError(error)
+            } catch (error: org.jaudiotagger.audio.exceptions.InvalidAudioFrameException) {
+                showFileEditError(error)
+            } catch (error: org.jaudiotagger.audio.exceptions.ReadOnlyFileException) {
+                showFileEditError(error)
+            } catch (error: org.jaudiotagger.tag.TagException) {
+                showFileEditError(error)
+            } catch (error: SecurityException) {
+                showFileEditError(error)
+            }
+        }
+    }
+
+    private fun showFileEditError(error: Exception) {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            pendingTagEdit = null
+            val detail = error.message?.takeIf(String::isNotBlank) ?: "The audio format may not support tag editing."
+            AlertDialog.Builder(this)
+                .setTitle("Could not save audio file")
+                .setMessage(detail)
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun currentTrack(): Track? {
@@ -773,48 +1079,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun editTags(track: Track) {
-        val title = EditText(this).apply { setText(track.title); hint = "Title" }
-        val artist = EditText(this).apply { setText(track.artist); hint = "Artist" }
-        val album = EditText(this).apply { setText(track.album); hint = "Album" }
-        val lyrics = EditText(this).apply {
-            setText(track.lyrics)
-            hint = "Lyrics (plain text or .lrc)"
-            minLines = 4
-            gravity = Gravity.TOP
-        }
-        val fields = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), 0, dp(24), 0)
-            addView(title)
-            addView(artist)
-            addView(album)
-            addView(lyrics)
-        }
-        val dialogContent = ScrollView(this).apply { addView(fields) }
-        AlertDialog.Builder(this)
-            .setTitle("Edit local tags")
-            .setMessage("Changes are saved in Lucy's library on this device.")
-            .setView(dialogContent)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save") { _, _ ->
-                database.saveTags(
-                    track.id,
-                    TrackTags(title.text.toString().trim(), artist.text.toString().trim(), album.text.toString().trim(), lyrics.text.toString())
-                )
-                loadTracks()
-            }
-            .show()
+        currentPage = Page.TrackEditor(track.id)
+        renderContent()
     }
 
     private fun trackActions(track: Track) {
         AlertDialog.Builder(this)
             .setTitle(track.title)
-            .setItems(arrayOf("Play next", "Add to playlist", "Edit tags", "View lyrics")) { _, which ->
+            .setItems(arrayOf("Play next", "Add to playlist", "Edit tags & lyrics")) { _, which ->
                 when (which) {
                     0 -> playNext(track)
                     1 -> choosePlaylist(track)
                     2 -> editTags(track)
-                    3 -> { currentPage = Page.Lyrics(track.id); renderContent() }
                 }
             }
             .show()
